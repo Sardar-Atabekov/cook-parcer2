@@ -13,7 +13,7 @@ const pool = new Pool({
 });
 
 async function main() {
-  const locales = ["en", "ar", "de", "es", "zh", "ru", "fr"];
+  const locales = ["es", "ar", "de", "en", "zh", "ru", "fr"];
   try {
     // for (const locale of locales) {
     //   console.log(`Syncing for locale: ${locale}`);
@@ -24,7 +24,6 @@ async function main() {
     for (const locale of locales) {
       let ingredients = await getIngredientsByLanguage(locale);
       console.log("ingredients", ingredients.length);
-      console.log("ingredients", ingredients);
       await syncSupercookRecipes(ingredients, locale);
       console.log("🎉 Импорт рецептов завершён.");
     }

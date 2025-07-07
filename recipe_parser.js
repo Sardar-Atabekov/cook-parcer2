@@ -11,9 +11,9 @@ const pool = new Pool({ connectionString: POSTGRES_URI });
 const db = drizzle(pool, { schema });
 
 const PAGE_SIZE = 61;
-const BATCH_SIZE = 100; // Define a batch size for inserts
+const BATCH_SIZE = 100;
 
-async function safePost(url, payload, headers, retries = 5) {
+async function safePost(url, payload, headers, retries = 5, context = "") {
   for (let i = 0; i < retries; i++) {
     try {
       return await axios.post(url, payload, { headers, timeout: 30000 });
@@ -21,8 +21,15 @@ async function safePost(url, payload, headers, retries = 5) {
       const isFinal = i === retries - 1;
       const isAbort =
         error.code === "ECONNABORTED" || error.message === "socket hang up";
+      const msg = error.message || error.code || "Неизвестная ошибка";
+
+      console.warn(
+        `⚠ ${context ? `[${context}] ` : ""}Попытка ${
+          i + 1
+        } не удалась: ${msg}. Повтор через 1с...`
+      );
+
       if (isFinal || isAbort) throw error;
-      console.warn(`Попытка ${i + 1} не удалась, повтор через 1с...`);
       await new Promise((r) => setTimeout(r, 1000));
     }
   }
@@ -53,7 +60,13 @@ async function getSupercookRecipesPage(ingredients, start = 0, lang = "ru") {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
   };
 
-  const response = await safePost(url, payload, headers);
+  const response = await safePost(
+    url,
+    payload,
+    headers,
+    5,
+    `page start=${start}`
+  );
   return response.data.results;
 }
 
@@ -70,12 +83,16 @@ async function getRecipeDetails(rid, lang = "ru") {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
   };
 
-  const response = await safePost(url, payload, headers);
+  const response = await safePost(url, payload, headers, 5, `recipe ID=${rid}`);
   return response.data;
 }
 
 async function saveRecipesBatchToDb(recipeDetailsBatch) {
   if (recipeDetailsBatch.length === 0) return;
+
+  console.log(
+    `=== Сохраняем пакет из ${recipeDetailsBatch.length} рецептов ===`
+  );
 
   await db.transaction(async (tx) => {
     const supercookIds = recipeDetailsBatch.map((rd) => rd.recipe.id);
@@ -144,7 +161,7 @@ async function saveRecipesBatchToDb(recipeDetailsBatch) {
 
     for (const recipeDetails of recipeDetailsBatch) {
       const recipe = recipeDetails.recipe;
-      let recipeDbId =
+      const recipeDbId =
         existingRecipeMap.get(recipe.id) || newRecipeIdMap.get(recipe.id);
 
       if (recipeDbId) {
@@ -162,9 +179,9 @@ async function saveRecipesBatchToDb(recipeDetailsBatch) {
 
           recipeIngredientsToInsert.push({
             recipeId: recipeDbId,
-            line: line,
+            line,
             matchedName: normalized,
-            ingredientId: ingredientId,
+            ingredientId,
             createdAt: new Date(),
           });
         }
@@ -176,6 +193,8 @@ async function saveRecipesBatchToDb(recipeDetailsBatch) {
         .insert(schema.recipeIngredients)
         .values(recipeIngredientsToInsert);
     }
+
+    console.log("✅ Пакет сохранён в базу.");
   });
 }
 
@@ -187,9 +206,12 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
 
   let start = 0;
   let recipeDetailsBuffer = [];
+  const failedRecipeIds = [];
+  let successCount = 0;
+  let skippedCount = 0;
 
   while (true) {
-    console.log(`Загружаем страницу рецептов с start=${start}...`);
+    console.log(`--- Загружаем страницу рецептов start=${start} ---`);
     const recipesPage = await getSupercookRecipesPage(
       ingredientsList,
       start,
@@ -207,46 +229,76 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
       existingRecipesOnPage.map((r) => r.supercookId)
     );
 
-    for (const recipeSummary of recipesPage) {
+    for (const [i, recipeSummary] of recipesPage.entries()) {
       const rid = recipeSummary.id;
       if (existingSupercookIdsSet.has(rid)) {
-        console.log(`Рецепт с Supercook ID=${rid} уже есть. Пропускаем.`);
+        console.log(`↪ Рецепт ID=${rid} уже есть. Пропущен.`);
+        skippedCount++;
         continue;
       }
 
       try {
-        console.log(`Получаем детали рецепта ID=${rid}...`);
+        console.log(
+          `Получаем детали рецепта ID=${rid} (${i + 1}/${recipesPage.length})`
+        );
         const recipeDetails = await getRecipeDetails(rid, lang);
-
         if (!recipeDetails?.recipe) {
-          console.warn(`Нет данных для рецепта title ${recipe.title}`);
+          console.warn(`⚠ Нет данных для рецепта ID=${rid}`);
           continue;
         }
+
         recipeDetailsBuffer.push(recipeDetails);
+        successCount++;
 
         if (recipeDetailsBuffer.length >= BATCH_SIZE) {
-          console.log(
-            `Сохраняем пакет из ${recipeDetailsBuffer.length} рецептов в БД...`
-          );
           await saveRecipesBatchToDb(recipeDetailsBuffer);
           recipeDetailsBuffer = [];
         }
       } catch (error) {
-        console.error(`Ошибка при обработке рецепта ID=${rid}:`, error.message);
+        failedRecipeIds.push(rid);
       }
+
+      await new Promise((r) => setTimeout(r, 500));
     }
 
     if (recipesPage.length < PAGE_SIZE) break;
     start += PAGE_SIZE;
   }
 
-  // Save any remaining recipes in the buffer
   if (recipeDetailsBuffer.length > 0) {
-    console.log(
-      `Сохраняем оставшиеся ${recipeDetailsBuffer.length} рецептов в БД...`
-    );
     await saveRecipesBatchToDb(recipeDetailsBuffer);
   }
 
-  console.log("✅ Синхронизация рецептов Supercook завершена");
+  // 🔁 Повторная обработка упавших ID
+  if (failedRecipeIds.length > 0) {
+    console.log(
+      `🔄 Повторная попытка для ${failedRecipeIds.length} упавших рецептов...`
+    );
+    const retryBuffer = [];
+
+    for (const rid of failedRecipeIds) {
+      try {
+        const recipeDetails = await getRecipeDetails(rid, lang);
+        if (!recipeDetails?.recipe) continue;
+        retryBuffer.push(recipeDetails);
+        successCount++;
+      } catch (error) {
+        console.warn(`⛔ Повторная ошибка рецепта ID=${rid}: ${error.message}`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (retryBuffer.length > 0) {
+      await saveRecipesBatchToDb(retryBuffer);
+    }
+  }
+
+  const failedFinalCount = failedRecipeIds.length - successCount + skippedCount;
+
+  console.log("📊 Статистика синхронизации:");
+  console.log(`✅ Успешно загружено: ${successCount}`);
+  console.log(`↪ Пропущено (уже в БД): ${skippedCount}`);
+  console.log(`❌ Не удалось загрузить: ${Math.max(failedFinalCount, 0)}`);
+
+  console.log("🎉 Синхронизация Supercook завершена");
 }
