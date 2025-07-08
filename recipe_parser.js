@@ -87,7 +87,7 @@ async function getRecipeDetails(rid, lang = "ru") {
   return response.data;
 }
 
-async function saveRecipesBatchToDb(recipeDetailsBatch) {
+async function saveRecipesBatchToDb(recipeDetailsBatch, lang) {
   if (recipeDetailsBatch.length === 0) return;
 
   console.log(
@@ -136,6 +136,7 @@ async function saveRecipesBatchToDb(recipeDetailsBatch) {
           prepTime: recipeDetails.attribs?.time_in_minutes || null,
           rating: recipeDetails.attribs?.rating || null,
           difficulty: null,
+          lang: lang,
           imageUrl: recipe.img || null,
           instructions: recipeDetails.instructions || null,
           sourceUrl: recipe.hash || null,
@@ -251,7 +252,7 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
         successCount++;
 
         if (recipeDetailsBuffer.length >= BATCH_SIZE) {
-          await saveRecipesBatchToDb(recipeDetailsBuffer);
+          await saveRecipesBatchToDb(recipeDetailsBuffer, lang);
           recipeDetailsBuffer = [];
         }
       } catch (error) {
@@ -266,7 +267,7 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
   }
 
   if (recipeDetailsBuffer.length > 0) {
-    await saveRecipesBatchToDb(recipeDetailsBuffer);
+    await saveRecipesBatchToDb(recipeDetailsBuffer, lang);
   }
 
   // 🔁 Повторная обработка упавших ID
@@ -289,7 +290,7 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
     }
 
     if (retryBuffer.length > 0) {
-      await saveRecipesBatchToDb(retryBuffer);
+      await saveRecipesBatchToDb(retryBuffer, lang);
     }
   }
 
