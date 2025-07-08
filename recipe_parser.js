@@ -218,6 +218,7 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
       start,
       lang
     );
+
     if (!Array.isArray(recipesPage) || recipesPage.length === 0) break;
 
     const supercookIdsOnPage = recipesPage.map((r) => r.id);
@@ -232,6 +233,7 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
 
     for (const [i, recipeSummary] of recipesPage.entries()) {
       const rid = recipeSummary.id;
+
       if (existingSupercookIdsSet.has(rid)) {
         console.log(`↪ Рецепт ID=${rid} уже есть. Пропущен.`);
         skippedCount++;
@@ -243,6 +245,7 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
           `Получаем детали рецепта ID=${rid} (${i + 1}/${recipesPage.length})`
         );
         const recipeDetails = await getRecipeDetails(rid, lang);
+
         if (!recipeDetails?.recipe) {
           console.warn(`⚠ Нет данных для рецепта ID=${rid}`);
           continue;
@@ -253,9 +256,13 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
 
         if (recipeDetailsBuffer.length >= BATCH_SIZE) {
           await saveRecipesBatchToDb(recipeDetailsBuffer, lang);
+          console.log(
+            `💾 Сохранили и очистили буфер из ${recipeDetailsBuffer.length} рецептов`
+          );
           recipeDetailsBuffer = [];
         }
       } catch (error) {
+        console.warn(`❌ Ошибка при получении ID=${rid}: ${error.message}`);
         failedRecipeIds.push(rid);
       }
 
@@ -266,11 +273,14 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
     start += PAGE_SIZE;
   }
 
+  // Финальный сброс
   if (recipeDetailsBuffer.length > 0) {
     await saveRecipesBatchToDb(recipeDetailsBuffer, lang);
+    console.log(`💾 Финально сохранили ${recipeDetailsBuffer.length} рецептов`);
+    recipeDetailsBuffer = [];
   }
 
-  // 🔁 Повторная обработка упавших ID
+  // Повторная попытка для неудачных
   if (failedRecipeIds.length > 0) {
     console.log(
       `🔄 Повторная попытка для ${failedRecipeIds.length} упавших рецептов...`
@@ -291,6 +301,9 @@ export async function syncSupercookRecipes(ingredientsList, lang = "ru") {
 
     if (retryBuffer.length > 0) {
       await saveRecipesBatchToDb(retryBuffer, lang);
+      console.log(
+        `💾 Повторно сохранено ${retryBuffer.length} рецептов после сбоев`
+      );
     }
   }
 

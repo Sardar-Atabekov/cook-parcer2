@@ -63,7 +63,7 @@ export const recipes = pgTable('recipes', {
   rating: integer('rating'),
   difficulty: text('difficulty'),
   imageUrl: text('image_url'),
-  lang: text('title').notNull(),
+  lang: text('lang'),
   instructions: jsonb('instructions'),
   sourceUrl: text('source_url'),
   supercookId: text("supercook_id").notNull().unique(),

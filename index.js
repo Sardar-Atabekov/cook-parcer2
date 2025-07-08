@@ -13,7 +13,7 @@ const pool = new Pool({
 });
 
 async function main() {
-  const locales = ["es", "ar", "de", "en", "zh", "ru", "fr"];
+  const locales = ["de", "ar", "fr", "en", "zh", "ru", "es"];
   try {
     // for (const locale of locales) {
     //   console.log(`Syncing for locale: ${locale}`);
