@@ -2,226 +2,272 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema.js";
 import axios from "axios";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { sql } from "drizzle-orm";
-const POSTGRES_URI =
-  "postgresql://postgres:GXZEoCNdFehOoXqXVFeJCQLGIjlZCwsu@maglev.proxy.rlwy.net:42374/railway";
+import dotenv from "dotenv";
 
-const pool = new Pool({
-  connectionString: POSTGRES_URI,
-});
+dotenv.config();
 
-const db = drizzle(pool, { schema });
-// Утилита для удаления дубликатов переводов по ключу ingredientId + language
-function deduplicateIngredientTranslations(data) {
-  const seen = new Set();
-  const result = [];
-  for (const item of data) {
-    const key = `${item.ingredientId}_${item.language}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(item);
-    }
-  }
-  return result;
+const POSTGRES_URI = process.env.POSTGRES_URI;
+if (!POSTGRES_URI) {
+  console.error("❌ POSTGRES_URI не установлена.");
+  process.exit(1);
 }
+
+const pool = new Pool({ connectionString: POSTGRES_URI });
+const db = drizzle(pool, { schema });
 
 async function fetchSupercookData(language = "ru") {
   const url = "https://d1.supercook.com/dyn/lang_ings";
   const payload = new URLSearchParams({ lang: language, cv: "2" }).toString();
-  const response = await axios.post(url, payload, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-  // The API returns an array directly, not an object with a 'data' key
-  const data = Array.isArray(response.data) ? response.data : response.data;
-  return data;
+  try {
+    const response = await axios.post(url, payload, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      timeout: 10000,
+    });
+    return Array.isArray(response.data) ? response.data : [];
+  } catch (error) {
+    console.error(`Ошибка получения данных: ${error.message}`);
+    return [];
+  }
 }
-export async function getIngredientsByLanguage(language) {
-  const rows = await db
-    .select({ name: schema.ingredientTranslations.name })
-    .from(schema.ingredientTranslations)
-    .where(eq(schema.ingredientTranslations.language, language));
 
-  return rows.map((row) => row.name);
-}
 export async function syncSupercookIngredients(language) {
-  if (!language) return;
+  if (!language) {
+    console.warn("⚠️ Язык не указан");
+    return;
+  }
 
+  console.log(`🚀 Синхронизация Supercook: ${language}`);
   const apiData = await fetchSupercookData(language);
+  if (!Array.isArray(apiData) || apiData.length === 0) {
+    console.log("📭 Нет данных для обработки");
+    return;
+  }
 
-  await db.transaction(async (tx) => {
-    // --- Загрузка категорий с переводами ---
-    const existingCategoryTranslations = await tx
-      .select()
-      .from(schema.ingredientCategoryTranslations)
-      .where(eq(schema.ingredientCategoryTranslations.language, language));
+  try {
+    await db.transaction(async (tx) => {
+      const [existingCategories, existingIngredients] = await Promise.all([
+        tx.select().from(schema.ingredientCategories),
+        tx
+          .select({
+            id: schema.ingredients.id,
+            name: schema.ingredients.name,
+            language: schema.ingredients.language,
+          })
+          .from(schema.ingredients)
+          .where(eq(schema.ingredients.isActive, true)),
+      ]);
 
-    const categoryMap = new Map();
-    for (const ct of existingCategoryTranslations) {
-      categoryMap.set(ct.name.toLowerCase(), ct.categoryId);
-    }
+      const categoryMap = new Map(
+        existingCategories.map((c) => [c.icon, c.id])
+      );
 
-    // --- Вставка новых категорий ---
-    const newCategoriesData = apiData
-      .filter((item) => !categoryMap.has(item.group_name.trim().toLowerCase()))
-      .map((item) => ({
-        parentId: null,
-        level: 0,
-        sortOrder: 0,
-        isActive: true,
-        icon: item.icon,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      }));
+      const ingredientMap = new Map(
+        existingIngredients.map((i) => [
+          `${i.name.trim().toLowerCase()}__${i.language}`,
+          i.id,
+        ])
+      );
 
-    let insertedCategories = [];
-    if (newCategoriesData.length > 0) {
-      insertedCategories = await tx
-        .insert(schema.ingredientCategories)
-        .values(newCategoriesData)
-        .returning({ id: schema.ingredientCategories.id });
-    }
+      const newCategories = [];
+      const categoryIconToName = new Map();
 
-    // --- Переводы новых категорий ---
-    const newCategoryTranslations = insertedCategories
-      .map((cat, idx) => ({
-        categoryId: cat.id,
-        language,
-        name:
-          apiData
-            .find((item) => item.icon === newCategoriesData[idx].icon)
-            ?.group_name.trim() ?? "",
-        description: null,
-      }))
-      .filter((ct) => ct.name);
+      for (const item of apiData) {
+        const icon = item.icon?.trim();
+        const groupName = item.group_name.trim();
+        if (!icon) continue;
 
-    if (newCategoryTranslations.length > 0) {
-      await tx
-        .insert(schema.ingredientCategoryTranslations)
-        .values(newCategoryTranslations)
-        .onConflictDoUpdate({
-          target: [
-            schema.ingredientCategoryTranslations.categoryId,
-            schema.ingredientCategoryTranslations.language,
-          ],
-          set: {
-            name: sql`excluded.name`,
-            description: null,
-          },
-        });
-    }
-
-    for (const ct of newCategoryTranslations) {
-      categoryMap.set(ct.name.toLowerCase(), ct.categoryId);
-    }
-
-    // --- Загрузка существующих ингредиентов ---
-    const existingIngredients = await tx
-      .select()
-      .from(schema.ingredients)
-      .where(eq(schema.ingredients.isActive, true));
-
-    const ingredientMap = new Map();
-    for (const ing of existingIngredients) {
-      ingredientMap.set(ing.primaryName.toLowerCase(), ing.id);
-    }
-
-    // --- Сбор новых ингредиентов ---
-    const newIngredientsData = [];
-
-    for (const item of apiData) {
-      const categoryName = item.group_name.trim().toLowerCase();
-      const catId = categoryMap.get(categoryName);
-      if (!catId) continue;
-
-      for (const display of item.ingredients) {
-        const term = display.trim();
-        const key = term.toLowerCase();
-
-        if (!ingredientMap.has(key)) {
-          newIngredientsData.push({
-            categoryId: catId,
-            primaryName: term,
+        categoryIconToName.set(icon, groupName);
+        if (!categoryMap.has(icon)) {
+          newCategories.push({
+            parentId: null,
+            level: 0,
+            sortOrder: 0,
             isActive: true,
+            icon,
             createdAt: new Date(),
             updatedAt: new Date(),
-            lastSyncAt: new Date(),
           });
         }
       }
-    }
 
-    // --- Вставка новых ингредиентов ---
-    let insertedIngredients = [];
-    if (newIngredientsData.length > 0) {
-      insertedIngredients = await tx
-        .insert(schema.ingredients)
-        .values(newIngredientsData)
-        .returning({
-          id: schema.ingredients.id,
-          primaryName: schema.ingredients.primaryName,
-        });
-    }
+      if (newCategories.length > 0) {
+        const inserted = await tx
+          .insert(schema.ingredientCategories)
+          .values(newCategories)
+          .returning({
+            id: schema.ingredientCategories.id,
+            icon: schema.ingredientCategories.icon,
+          });
 
-    for (const ing of insertedIngredients) {
-      ingredientMap.set(ing.primaryName.toLowerCase(), ing.id);
-    }
+        for (const cat of inserted) {
+          categoryMap.set(cat.icon, cat.id);
+        }
+      }
 
-    // --- Подготовка переводов для всех ингредиентов ---
-    const ingredientTranslationsData = [];
+      const catTranslations = [];
+      for (const [icon, name] of categoryIconToName.entries()) {
+        const categoryId = categoryMap.get(icon);
+        if (!categoryId) continue;
 
-    for (const item of apiData) {
-      const categoryName = item.group_name.trim().toLowerCase();
-      const catId = categoryMap.get(categoryName);
-      if (!catId) continue;
-
-      for (const display of item.ingredients) {
-        const term = display.trim();
-        const ingredientId = ingredientMap.get(term.toLowerCase());
-        if (!ingredientId) continue;
-
-        ingredientTranslationsData.push({
-          ingredientId,
+        catTranslations.push({
+          categoryId,
           language,
-          name: term,
+          name,
+          description: null,
         });
       }
-    }
 
-    // --- Удаляем дубликаты переводов по ingredientId + language ---
-    const dedupedTranslations = deduplicateIngredientTranslations(
-      ingredientTranslationsData
-    );
+      if (catTranslations.length > 0) {
+        await tx
+          .insert(schema.ingredientCategoryTranslations)
+          .values(catTranslations)
+          .onConflictDoNothing({
+            target: [
+              schema.ingredientCategoryTranslations.categoryId,
+              schema.ingredientCategoryTranslations.language,
+            ],
+          });
+      }
 
-    // --- Вставляем переводы с upsert ---
-    if (dedupedTranslations.length > 0) {
-      await tx
-        .insert(schema.ingredientTranslations)
-        .values(dedupedTranslations)
-        .onConflictDoUpdate({
-          target: [
-            schema.ingredientTranslations.ingredientId,
-            schema.ingredientTranslations.language,
-          ],
-          set: {
-            name: sql`excluded.name`,
-          },
-        });
-    }
-  });
+      const newIngredients = [];
+      const newIngredientSet = new Set();
 
-  console.log("Синхронизация Supercook завершена");
+      for (const item of apiData) {
+        const icon = item.icon?.trim();
+        if (!icon) continue;
+
+        for (const rawTerm of item.ingredients) {
+          const name = rawTerm.trim();
+          const key = `${name.toLowerCase()}__${language}`;
+          if (!ingredientMap.has(key) && !newIngredientSet.has(key)) {
+            newIngredients.push({
+              name,
+              language,
+              isActive: true,
+              aliases: null,
+              nutritionalData: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              lastSyncAt: new Date(),
+            });
+            newIngredientSet.add(key);
+          }
+        }
+      }
+
+      if (newIngredients.length > 0) {
+        const inserted = await tx
+          .insert(schema.ingredients)
+          .values(newIngredients)
+          .onConflictDoNothing({
+            target: [schema.ingredients.name, schema.ingredients.language],
+          })
+          .returning({
+            id: schema.ingredients.id,
+            name: schema.ingredients.name,
+          });
+
+        for (const ing of inserted) {
+          const key = `${ing.name.trim().toLowerCase()}__${language}`;
+          ingredientMap.set(key, ing.id);
+        }
+      }
+
+      const existingLinks = await tx
+        .select({
+          ingredientId: schema.ingredientCategoryLinks.ingredientId,
+          categoryId: schema.ingredientCategoryLinks.categoryId,
+        })
+        .from(schema.ingredientCategoryLinks);
+
+      const existingLinksSet = new Set(
+        existingLinks.map((l) => `${l.ingredientId}_${l.categoryId}`)
+      );
+
+      const newLinks = [];
+      const expectedCounts = new Map();
+      const actualCounts = new Map();
+
+      for (const item of apiData) {
+        const icon = item.icon?.trim();
+        const categoryId = categoryMap.get(icon);
+        if (!categoryId) continue;
+
+        const uniqueTerms = new Set();
+
+        for (const rawTerm of item.ingredients) {
+          const key = `${rawTerm.trim().toLowerCase()}__${language}`;
+          if (uniqueTerms.has(key)) continue;
+          uniqueTerms.add(key);
+
+          const ingredientId = ingredientMap.get(key);
+          if (!ingredientId) continue;
+
+          const linkKey = `${ingredientId}_${categoryId}`;
+          if (!existingLinksSet.has(linkKey)) {
+            newLinks.push({ ingredientId, categoryId });
+            existingLinksSet.add(linkKey);
+            actualCounts.set(
+              categoryId,
+              (actualCounts.get(categoryId) || 0) + 1
+            );
+          }
+        }
+
+        expectedCounts.set(
+          categoryId,
+          (expectedCounts.get(categoryId) || 0) + uniqueTerms.size
+        );
+      }
+
+      if (newLinks.length > 0) {
+        await tx
+          .insert(schema.ingredientCategoryLinks)
+          .values(newLinks)
+          .onConflictDoNothing({
+            target: [
+              schema.ingredientCategoryLinks.ingredientId,
+              schema.ingredientCategoryLinks.categoryId,
+            ],
+          });
+      }
+
+      console.log("\n📊 Проверка по категориям:");
+      for (const [catId, expected] of expectedCounts.entries()) {
+        const actual = actualCounts.get(catId) || 0;
+        const icon = [...categoryMap.entries()].find(
+          ([, id]) => id === catId
+        )?.[0];
+        const status = expected === actual ? "✅ OK" : "⚠️ Несовпадение";
+        console.log(
+          `- ${icon || "?"} → API: ${expected}, Связано: ${actual} ${status}`
+        );
+      }
+    });
+
+    console.log(`✅ Синхронизация завершена: ${language}`);
+  } catch (error) {
+    console.error(`❌ Ошибка при синхронизации: ${error.message}`);
+    throw error;
+  }
 }
 
-export async function logIngredientCountsByLocale(locales) {
-  console.log("\n📊 Ingredient counts per language:");
-  for (const locale of locales) {
-    const result = await db
-      .select({ count: sql`COUNT(*)` })
-      .from(schema.ingredientTranslations)
-      .where(eq(schema.ingredientTranslations.language, locale));
-
-    const count = result[0]?.count || 0;
-    console.log(`- ${locale}: ${count} ingredients`);
+export async function getIngredientsByLanguage(language) {
+  try {
+    const rows = await db
+      .select({ name: schema.ingredients.name })
+      .from(schema.ingredients)
+      .where(
+        and(
+          eq(schema.ingredients.language, language),
+          eq(schema.ingredients.isActive, true)
+        )
+      );
+    return rows.map((r) => r.name);
+  } catch (error) {
+    console.error("Ошибка в getIngredientsByLanguage:", error.message);
+    return [];
   }
 }

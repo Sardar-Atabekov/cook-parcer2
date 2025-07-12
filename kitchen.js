@@ -40,12 +40,7 @@ async function safePost(url, payload, headers, retries = 5, context = "") {
   }
 }
 
-async function getSupercookRecipesPage(
-  ingredients,
-  start = 0,
-  lang = "ru",
-  catname = ""
-) {
+async function getSupercookRecipesPage(ingredients, start = 0, lang = "ru") {
   const url = "https://d1.supercook.com/dyn/results";
   const payload = new URLSearchParams({
     needsimage: "1",
@@ -53,7 +48,7 @@ async function getSupercookRecipesPage(
     kitchen: ingredients.join(","),
     focus: "exclude",
     kw: "",
-    catname: catname,
+    catname: "",
     start: start.toString(),
     fave: "false",
     lh: "cd9408d6f5f314c68d2697a18761da142b47645c",
@@ -97,7 +92,7 @@ async function getRecipeDetails(rid, lang = "ru") {
   return response.data;
 }
 
-async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
+async function saveRecipesBatchToDb(recipeDetailsBatch, lang) {
   if (recipeDetailsBatch.length === 0) return;
 
   console.log(
@@ -105,30 +100,6 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
   );
 
   await db.transaction(async (tx) => {
-    // Получаем ID тега в нужной таблице
-    let tagId = null;
-    if (tagItem) {
-      if (tagItem.type === "meal_type") {
-        const result = await tx
-          .select({ id: schema.mealTypes.id })
-          .from(schema.mealTypes)
-          .where(eq(schema.mealTypes.tag, tagItem.tag));
-        tagId = result[0]?.id || null;
-      } else if (tagItem.type === "diet") {
-        const result = await tx
-          .select({ id: schema.diets.id })
-          .from(schema.diets)
-          .where(eq(schema.diets.tag, tagItem.tag));
-        tagId = result[0]?.id || null;
-      } else if (tagItem.type === "kitchen") {
-        const result = await tx
-          .select({ id: schema.kitchens.id })
-          .from(schema.kitchens)
-          .where(eq(schema.kitchens.tag, tagItem.tag));
-        tagId = result[0]?.id || null;
-      }
-    }
-
     const supercookIds = recipeDetailsBatch.map((rd) => rd.recipe.id);
     const existingRecipes = await tx
       .select({
@@ -145,7 +116,6 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
     const recipesToInsert = [];
     const recipeIngredientsToInsert = [];
 
-    // Собираем все уникальные ингредиенты из пакета
     const allIngredientNames = new Set();
     recipeDetailsBatch.forEach((rd) => {
       rd.ingredients.forEach((ing) => {
@@ -154,7 +124,6 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
       });
     });
 
-    // Получаем уже существующие ингредиенты из базы
     const existingIngredients = await tx
       .select()
       .from(schema.ingredients)
@@ -164,10 +133,11 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
       existingIngredients.map((ing) => [ing.name.trim().toLowerCase(), ing.id])
     );
 
-    // Формируем записи для вставки рецептов
     for (const recipeDetails of recipeDetailsBatch) {
       const recipe = recipeDetails.recipe;
       let recipeDbId = existingRecipeMap.get(recipe.id);
+      console.log("recipe", recipe);
+      console.log("lang", lang);
       if (!recipeDbId) {
         recipesToInsert.push({
           supercookId: recipe.id,
@@ -200,18 +170,12 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
       insertedRecipes.map((r) => [r.supercookId, r.id])
     );
 
-    // Формируем связи рецептов с ингредиентами и тегами
-    const mealTypeLinks = [];
-    const dietLinks = [];
-    const kitchenLinks = [];
-
     for (const recipeDetails of recipeDetailsBatch) {
       const recipe = recipeDetails.recipe;
       const recipeDbId =
         existingRecipeMap.get(recipe.id) || newRecipeIdMap.get(recipe.id);
 
       if (recipeDbId) {
-        // Ингредиенты
         for (const ingredientObj of recipeDetails.ingredients) {
           const line = ingredientObj.line?.trim();
           if (!line) continue;
@@ -232,17 +196,6 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
             createdAt: new Date(),
           });
         }
-
-        // Теги по типу
-        if (tagId) {
-          if (tagItem.type === "meal_type") {
-            mealTypeLinks.push({ recipeId: recipeDbId, mealTypeId: tagId });
-          } else if (tagItem.type === "diet") {
-            dietLinks.push({ recipeId: recipeDbId, dietId: tagId });
-          } else if (tagItem.type === "kitchen") {
-            kitchenLinks.push({ recipeId: recipeDbId, kitchenId: tagId });
-          }
-        }
       }
     }
 
@@ -250,24 +203,6 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
       await tx
         .insert(schema.recipeIngredients)
         .values(recipeIngredientsToInsert);
-    }
-    if (mealTypeLinks.length > 0) {
-      await tx
-        .insert(schema.recipeMealTypes)
-        .values(mealTypeLinks)
-        .onConflictDoNothing();
-    }
-    if (dietLinks.length > 0) {
-      await tx
-        .insert(schema.recipeDiets)
-        .values(dietLinks)
-        .onConflictDoNothing();
-    }
-    if (kitchenLinks.length > 0) {
-      await tx
-        .insert(schema.recipeKitchens)
-        .values(kitchenLinks)
-        .onConflictDoNothing();
     }
 
     console.log("✅ Пакет сохранён в базу.");
@@ -277,8 +212,7 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
 export async function syncSupercookRecipes(
   ingredientsList,
   lang = "ru",
-  count = null,
-  tagItem = null // объект {type, tag, name}
+  count = null
 ) {
   if (!ingredientsList?.length) {
     console.log("Список ингредиентов пуст. Синхронизация невозможна.");
@@ -303,8 +237,7 @@ export async function syncSupercookRecipes(
     const recipesPage = await getSupercookRecipesPage(
       ingredientsList,
       start,
-      lang,
-      tagItem?.tag || ""
+      lang
     );
 
     if (!Array.isArray(recipesPage) || recipesPage.length === 0) break;
@@ -350,7 +283,7 @@ export async function syncSupercookRecipes(
         successCount++;
 
         if (recipeDetailsBuffer.length >= BATCH_SIZE) {
-          await saveRecipesBatchToDb(recipeDetailsBuffer, lang, tagItem);
+          await saveRecipesBatchToDb(recipeDetailsBuffer, lang);
           console.log(
             `💾 Сохранили и очистили буфер из ${recipeDetailsBuffer.length} рецептов`
           );
@@ -370,7 +303,7 @@ export async function syncSupercookRecipes(
 
   // Финальный сброс буфера
   if (recipeDetailsBuffer.length > 0) {
-    await saveRecipesBatchToDb(recipeDetailsBuffer, lang, tagItem);
+    await saveRecipesBatchToDb(recipeDetailsBuffer, lang);
     console.log(`💾 Финально сохранили ${recipeDetailsBuffer.length} рецептов`);
     recipeDetailsBuffer = [];
   }
@@ -404,7 +337,7 @@ export async function syncSupercookRecipes(
     }
 
     if (retryBuffer.length > 0) {
-      await saveRecipesBatchToDb(retryBuffer, lang, tagItem);
+      await saveRecipesBatchToDb(retryBuffer, lang);
       console.log(
         `💾 Повторно сохранено ${retryBuffer.length} рецептов после сбоев`
       );
