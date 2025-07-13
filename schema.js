@@ -100,10 +100,12 @@ export const recipes = pgTable("recipes", {
   sourceUrl: text("source_url"),
   supercookId: text("supercook_id").notNull().unique(),
   createdAt: timestamp("created_at").defaultNow(),
+  viewed: integer("viewed").default(0),
 });
 
 export const mealTypes = pgTable('meal_types', {
   id: serial('id').primaryKey(),
+  type: text('type').notNull(),
   tag: text('tag').notNull().unique(), // оригинальный tag с сайта
   slug: text('slug').notNull().unique(), // для фильтрации
   name: text('name').notNull(),
@@ -112,6 +114,7 @@ export const mealTypes = pgTable('meal_types', {
 
 export const diets = pgTable('diets', {
   id: serial('id').primaryKey(),
+  type: text('type').notNull(),
   tag: text('tag').notNull().unique(),
   slug: text('slug').notNull().unique(),
   name: text('name').notNull(),
@@ -123,6 +126,7 @@ export const kitchens = pgTable('kitchens', {
   tag: text('tag').notNull().unique(),
   slug: text('slug').notNull().unique(),
   name: text('name').notNull(),
+  type: text('type').notNull(),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
@@ -141,42 +145,6 @@ export const recipeKitchens = pgTable("recipe_kitchens", {
   recipeId: integer("recipe_id").references(() => recipes.id),
   kitchenId: integer("kitchen_id").references(() => kitchens.id),
 });
-
-// export const ingredients = pgTable('ingredients', {
-//   id: serial('id').primaryKey(),
-//   primaryName: text('primary_name').notNull().unique(),
-//   categoryId: integer('category_id'),
-//   isActive: boolean('is_active').default(true),
-//   createdAt: timestamp('created_at').defaultNow(),
-//   updatedAt: timestamp('updated_at').defaultNow(),
-//   lastSyncAt: timestamp('last_sync_at').defaultNow(),
-// });
-
-// export const ingredientCategories = pgTable('ingredient_categories', {
-//   id: serial('id').primaryKey(),
-//   parentId: integer('parent_id'),
-//   level: integer('level').notNull(),
-//   sortOrder: integer('sort_order').notNull(),
-//   isActive: boolean('is_active').default(true),
-//   icon: text('icon'),
-//   createdAt: timestamp('created_at').defaultNow(),
-//   updatedAt: timestamp('updated_at').defaultNow(),
-// });
-
-// export const ingredientCategoryTranslations = pgTable('ingredient_category_translations', {
-//   id: serial('id').primaryKey(),
-//   categoryId: integer('category_id').references(() => ingredientCategories.id).notNull(),
-//   language: text('language').notNull(),
-//   name: text('name').notNull(),
-//   description: text('description'),
-// });
-
-// export const ingredientTranslations = pgTable('ingredient_translations', {
-//   id: serial('id').primaryKey(),
-//   ingredientId: integer('ingredient_id').references(() => ingredients.id).notNull(),
-//   language: text('language').notNull(),
-//   name: text('name').notNull(),
-// });
 
 export const recipeIngredients = pgTable("recipe_ingredients", {
   id: serial("id").primaryKey(),

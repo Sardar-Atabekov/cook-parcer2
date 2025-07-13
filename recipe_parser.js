@@ -31,11 +31,17 @@ async function safePost(url, payload, headers, retries = 5, context = "") {
       console.warn(
         `⚠ ${context ? `[${context}] ` : ""}Попытка ${
           i + 1
-        } не удалась: ${msg}. Повтор через 1с...`
+        } не удалась: ${msg}. Повтор через 3с...`
       );
 
-      if (isFinal || isAbort) throw error;
-      await new Promise((r) => setTimeout(r, 1000));
+      if (isFinal || isAbort) {
+        console.warn(
+          `🚫 ${context}: Запрос окончательно не удался. Пропускаем.`
+        );
+        return null;
+      }
+
+      await new Promise((r) => setTimeout(r, 3000)); // ⏳ пауза 3 сек
     }
   }
 }
@@ -97,6 +103,36 @@ async function getRecipeDetails(rid, lang = "ru") {
   return response.data;
 }
 
+async function recipeHasTag(recipeId, tagId, tagItem, tx) {
+  if (!recipeId || !tagId || !tagItem) return false;
+  let query;
+  if (tagItem.type === "meal_type") {
+    query = await tx
+      .select()
+      .from(schema.recipeMealTypes)
+      .where(
+        eq(schema.recipeMealTypes.recipeId, recipeId),
+        eq(schema.recipeMealTypes.mealTypeId, tagId)
+      );
+  } else if (tagItem.type === "diet") {
+    query = await tx
+      .select()
+      .from(schema.recipeDiets)
+      .where(
+        eq(schema.recipeDiets.recipeId, recipeId),
+        eq(schema.recipeDiets.dietId, tagId)
+      );
+  } else if (tagItem.type === "kitchen") {
+    query = await tx
+      .select()
+      .from(schema.recipeKitchens)
+      .where(
+        eq(schema.recipeKitchens.recipeId, recipeId),
+        eq(schema.recipeKitchens.kitchenId, tagId)
+      );
+  }
+  return query?.length > 0;
+}
 async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
   if (recipeDetailsBatch.length === 0) return;
 
@@ -106,28 +142,7 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
 
   await db.transaction(async (tx) => {
     // Получаем ID тега в нужной таблице
-    let tagId = null;
-    if (tagItem) {
-      if (tagItem.type === "meal_type") {
-        const result = await tx
-          .select({ id: schema.mealTypes.id })
-          .from(schema.mealTypes)
-          .where(eq(schema.mealTypes.tag, tagItem.tag));
-        tagId = result[0]?.id || null;
-      } else if (tagItem.type === "diet") {
-        const result = await tx
-          .select({ id: schema.diets.id })
-          .from(schema.diets)
-          .where(eq(schema.diets.tag, tagItem.tag));
-        tagId = result[0]?.id || null;
-      } else if (tagItem.type === "kitchen") {
-        const result = await tx
-          .select({ id: schema.kitchens.id })
-          .from(schema.kitchens)
-          .where(eq(schema.kitchens.tag, tagItem.tag));
-        tagId = result[0]?.id || null;
-      }
-    }
+    let tagId = tagItem?.id || null;
 
     const supercookIds = recipeDetailsBatch.map((rd) => rd.recipe.id);
     const existingRecipes = await tx
@@ -181,6 +196,7 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
           instructions: recipeDetails.instructions || null,
           sourceUrl: recipe.hash || null,
           createdAt: new Date(),
+          viewed: 0,
         });
       }
     }
@@ -234,7 +250,7 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
         }
 
         // Теги по типу
-        if (tagId) {
+        if (tagId && tagItem) {
           if (tagItem.type === "meal_type") {
             mealTypeLinks.push({ recipeId: recipeDbId, mealTypeId: tagId });
           } else if (tagItem.type === "diet") {
@@ -274,11 +290,55 @@ async function saveRecipesBatchToDb(recipeDetailsBatch, lang, tagItem = null) {
   });
 }
 
+async function linkRecipeWithTag(recipeId, tagId, tagItem, tx) {
+  if (!recipeId || !tagId || !tagItem) return;
+
+  const alreadyLinked = await recipeHasTag(recipeId, tagId, tagItem, tx);
+  if (alreadyLinked) return;
+
+  if (tagItem.type === "meal_type") {
+    await tx
+      .insert(schema.recipeMealTypes)
+      .values({ recipeId, mealTypeId: tagId })
+      .onConflictDoNothing();
+  } else if (tagItem.type === "diet") {
+    await tx
+      .insert(schema.recipeDiets)
+      .values({ recipeId, dietId: tagId })
+      .onConflictDoNothing();
+  } else if (tagItem.type === "kitchen") {
+    await tx
+      .insert(schema.recipeKitchens)
+      .values({ recipeId, kitchenId: tagId })
+      .onConflictDoNothing();
+  }
+}
+
+async function addTagToExistingRecipes(supercookIds, tagItem) {
+  if (!tagItem) return;
+  await db.transaction(async (tx) => {
+    const tagId = tagItem?.id;
+    if (!tagId) return;
+
+    const existingRecipes = await tx
+      .select({
+        id: schema.recipes.id,
+        supercookId: schema.recipes.supercookId,
+      })
+      .from(schema.recipes)
+      .where(inArray(schema.recipes.supercookId, supercookIds));
+
+    for (const recipe of existingRecipes) {
+      await linkRecipeWithTag(recipe.id, tagId, tagItem, tx);
+    }
+  });
+}
+
 export async function syncSupercookRecipes(
   ingredientsList,
   lang = "ru",
   count = null,
-  tagItem = null // объект {type, tag, name}
+  tagItem = null
 ) {
   if (!ingredientsList?.length) {
     console.log("Список ингредиентов пуст. Синхронизация невозможна.");
@@ -290,6 +350,7 @@ export async function syncSupercookRecipes(
   const failedRecipeIds = [];
   let successCount = 0;
   let skippedCount = 0;
+  let failPageCount = 0;
 
   while (true) {
     if (count !== null && successCount >= count) {
@@ -307,7 +368,27 @@ export async function syncSupercookRecipes(
       tagItem?.tag || ""
     );
 
-    if (!Array.isArray(recipesPage) || recipesPage.length === 0) break;
+    if (!recipesPage) {
+      failPageCount++;
+      console.warn(
+        `🚫 Ошибка загрузки страницы start=${start} (failPageCount=${failPageCount})`
+      );
+
+      if (failPageCount >= 3) {
+        console.warn(
+          `⏳ Три страницы подряд не загрузились. Ждём 30 секунд...`
+        );
+        await new Promise((r) => setTimeout(r, 30000));
+        failPageCount = 0;
+      } else {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+
+      start += PAGE_SIZE;
+      continue;
+    } else {
+      failPageCount = 0; // сброс счётчика после успешной страницы
+    }
 
     const supercookIdsOnPage = recipesPage.map((r) => r.id);
     const existingRecipesOnPage = await db
@@ -319,13 +400,13 @@ export async function syncSupercookRecipes(
       existingRecipesOnPage.map((r) => r.supercookId)
     );
 
+    const existingIds = Array.from(existingSupercookIdsSet);
+    if (existingIds.length > 0 && tagItem) {
+      await addTagToExistingRecipes(existingIds, tagItem);
+    }
+
     for (const [i, recipeSummary] of recipesPage.entries()) {
-      if (count !== null && successCount >= count) {
-        console.log(
-          `Достигнут лимит по количеству сохранённых рецептов: ${count}`
-        );
-        break;
-      }
+      if (count !== null && successCount >= count) break;
 
       const rid = recipeSummary.id;
 
@@ -368,13 +449,11 @@ export async function syncSupercookRecipes(
     start += PAGE_SIZE;
   }
 
-  // Финальный сброс буфера
   if (recipeDetailsBuffer.length > 0) {
     await saveRecipesBatchToDb(recipeDetailsBuffer, lang, tagItem);
     console.log(`💾 Финально сохранили ${recipeDetailsBuffer.length} рецептов`);
     recipeDetailsBuffer = [];
   }
-
   // Повторная попытка загрузки упавших рецептов с учётом лимита
   if (failedRecipeIds.length > 0) {
     console.log(
