@@ -39,9 +39,9 @@ async function main() {
         console.log(
           `🌍 Syncing ${tagItem.type} "${tagItem.name}" [${tagItem.tag}] for locale: ${locale}`
         );
-        await syncSupercookRecipes(ingredients, locale, 50, tagItem);
+        await syncSupercookRecipes(ingredients, locale, null, tagItem);
       }
-      await syncSupercookRecipes(ingredients, locale, 100);
+      await syncSupercookRecipes(ingredients, locale);
 
       console.log("✅ Импорт рецептов для локали завершён:", locale);
     }
