@@ -15,12 +15,11 @@ if (!POSTGRES_URI) {
   console.error("❌ POSTGRES_URI не установлена.");
   process.exit(1);
 }
-const locales = process.env.LOCALES.split(",");
+// const locales = process.env.LOCALES.split(",");
 const pool = new Pool({ connectionString: POSTGRES_URI });
 const db = drizzle(pool, { schema });
 
 async function main() {
-
   const mealTypes = await db.select().from(schema.mealTypes);
   const dieta = await db.select().from(schema.diets);
   const kitchen = await db.select().from(schema.kitchens);
@@ -29,25 +28,27 @@ async function main() {
     //   console.log(`Syncing for locale: ${locale}`);
     //   await syncSupercookIngredients(locale);
     // }
+    const locales = ["ru"];
     for (const locale of locales) {
-      await syncSupercookIngredients(locale);
-      const ingredients = await getIngredientsByLanguage(locale);
+      // await syncSupercookIngredients(locale);
+      let ingredients = await getIngredientsByLanguage(locale);
       console.log("📥 Ingredients for locale:", locale, ingredients.length);
 
-      const allTags = [...kitchen, ...mealTypes, ...dieta];
+      // const allTags = [...kitchen, ...mealTypes, ...dieta];
 
-      for (const tagItem of allTags) {
-        console.log(
-          `🌍 Syncing ${tagItem.type} "${tagItem.name}" [${tagItem.tag}] for locale: ${locale}`
-        );
-        console.log(`🌍 Syncing tagItem`);
-        await syncSupercookRecipes(ingredients, locale, null, tagItem);
+      // for (const tagItem of allTags) {
+      //   console.log(
+      //     `🌍 Syncing ${tagItem.type} "${tagItem.name}" [${tagItem.tag}] for locale: ${locale}`
+      //   );
+      //   console.log(`🌍 Syncing tagItem`);
+      //   await syncSupercookRecipes(ingredients, locale, null, tagItem);
+      // }
+
+      for (const ingredient of ingredients.slice(3)) {
+        console.log(`🌍 Syncing ingredient "${ingredient}" for locale: ${locale}`);
+        await syncSupercookRecipes([ingredient], locale);
       }
-      await syncSupercookRecipes(ingredients, locale);
-
-      console.log("✅ Импорт рецептов для локали завершён:", locale);
     }
-
     console.log("🎉 Все локали обработаны.");
   } catch (error) {
     console.error("❌ Ошибка при импорте данных:", error);

@@ -20,29 +20,19 @@ const pool = new Pool({ connectionString: POSTGRES_URI });
 const db = drizzle(pool, { schema });
 
 async function main() {
-  const mealTypes = await db.select().from(schema.mealTypes);
-  const dieta = await db.select().from(schema.diets);
-  const kitchen = await db.select().from(schema.kitchens);
   try {
-    for (const locale of locales) {
-      console.log(`Syncing for locale: ${locale}`);
-      await syncSupercookIngredients(locale);
-    }
     for (const locale of locales) {
       await syncSupercookIngredients(locale);
       const ingredients = await getIngredientsByLanguage(locale);
       console.log("📥 Ingredients for locale:", locale, ingredients.length);
 
-      const allTags = [...kitchen, ...mealTypes, ...dieta];
-
-      for (const tagItem of allTags) {
+      for (const ingredient of ingredients) {
         console.log(
-          `🌍 Syncing ${tagItem.type} "${tagItem.name}" [${tagItem.tag}] for locale: ${locale}`
+          `🌍 Syncing ingredient "${ingredient}" for locale: ${locale}`
         );
-        await syncSupercookRecipes(ingredients, locale, null, tagItem);
+        await syncSupercookRecipes([ingredient], locale, 30);
+        console.log(`✅ Импорт рецептов для ${ingredient} завершён:`, locale);
       }
-      await syncSupercookRecipes(ingredients, locale);
-
       console.log("✅ Импорт рецептов для локали завершён:", locale);
     }
 

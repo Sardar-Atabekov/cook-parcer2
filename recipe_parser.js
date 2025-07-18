@@ -83,6 +83,9 @@ async function getSupercookRecipesPage(
     5,
     `page start=${start}`
   );
+  if (!response || !response.data || !response.data.results) {
+    return null;
+  }
   return response.data.results;
 }
 
